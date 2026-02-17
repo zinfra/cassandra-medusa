@@ -19,8 +19,13 @@ on:
           - k8s/Dockerfile.ubuntu
           - k8s/Dockerfile
       tag:
-        description: 'Tag to use (default: auto-generated)'
+        description: 'Custom version tag (e.g., 0.22.3, v1.0.0). If empty, uses auto-generated tag'
         required: false
+      version_tag:
+        description: 'Also tag with version from VERSION file'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build-and-push-quay:
@@ -50,28 +55,44 @@ jobs:
       - name: Set image metadata
         id: meta
         run: |
-          VERSION=$(cat VERSION 2>/dev/null || echo "latest")
+          VERSION=$(cat VERSION 2>/dev/null || echo "")
           SHA_SHORT=$(git rev-parse --short=8 HEAD)
           BRANCH_NAME=${GITHUB_REF#refs/heads/}
           BRANCH_NAME=${BRANCH_NAME//\//-}
           
-          # Determine tag based on event or input
+          # Determine primary tag based on event or input
           if [ -n "${{ github.event.inputs.tag }}" ]; then
-            TAG="${{ github.event.inputs.tag }}"
+            PRIMARY_TAG="${{ github.event.inputs.tag }}"
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/* ]]; then
-            TAG="${{ github.ref_name }}"
+            PRIMARY_TAG="${{ github.ref_name }}"
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/master" ]]; then
-            TAG="master-${SHA_SHORT}"
+            PRIMARY_TAG="master-${SHA_SHORT}"
           else
-            TAG="${BRANCH_NAME}-${SHA_SHORT}"
+            PRIMARY_TAG="${BRANCH_NAME}-${SHA_SHORT}"
           fi
           
           QUAY_REPO="${{ secrets.QUAY_REPOSITORY || 'wire/cassandra-medusa' }}"
           QUAY_IMAGE="quay.io/${QUAY_REPO}"
           
+          # Build list of tags (full image paths)
+          TAGS="${QUAY_IMAGE}:${PRIMARY_TAG}"
+          
+          # Add version tag if requested or if VERSION file exists and no custom tag provided
+          if [ "${{ github.event.inputs.version_tag }}" == "true" ] || ([ -n "${VERSION}" ] && [ -z "${{ github.event.inputs.tag }}" ]); then
+            if [ -n "${VERSION}" ]; then
+              TAGS="${TAGS}\n${QUAY_IMAGE}:${VERSION}"
+            fi
+          fi
+          
+          # Always add SHA and latest
+          TAGS="${TAGS}\n${QUAY_IMAGE}:${SHA_SHORT}\n${QUAY_IMAGE}:latest"
+          
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "sha_short=${SHA_SHORT}" >> $GITHUB_OUTPUT
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "primary_tag=${PRIMARY_TAG}" >> $GITHUB_OUTPUT
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          echo -e "${TAGS}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
           echo "quay_image=${QUAY_IMAGE}" >> $GITHUB_OUTPUT
 
       - name: Determine Dockerfile
@@ -98,9 +119,7 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ steps.meta.outputs.quay_image }}:${{ steps.meta.outputs.tag }}
-            ${{ steps.meta.outputs.quay_image }}:${{ steps.meta.outputs.sha_short }}
-            ${{ steps.meta.outputs.quay_image }}:latest
+            ${{ steps.meta.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -108,8 +127,11 @@ jobs:
         run: |
           echo "## Docker Images Built and Pushed to Quay.io" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version**: ${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tag**: ${{ steps.meta.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ steps.meta.outputs.version }}" ]; then
+            echo "- **Version**: ${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- **Primary Tag**: ${{ steps.meta.outputs.primary_tag }}" >> $GITHUB_STEP_SUMMARY
           echo "- **SHA**: ${{ steps.meta.outputs.sha_short }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Platforms**: linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
-          echo "- **Quay.io Image**: ${{ steps.meta.outputs.quay_image }}:${{ steps.meta.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **All Tags**: ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Quay.io Image**: ${{ steps.meta.outputs.quay_image }}" >> $GITHUB_STEP_SUMMARY
