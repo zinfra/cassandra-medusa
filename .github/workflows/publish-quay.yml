@@ -1,0 +1,130 @@
+name: Build and Push to Quay.io
+
+on:
+  workflow_dispatch:
+    inputs:
+      dockerfile:
+        description: 'Dockerfile to use'
+        required: false
+        default: 'k8s/Dockerfile.ubuntu'
+        type: choice
+        options:
+          - k8s/Dockerfile.ubuntu
+          - k8s/Dockerfile
+      tag:
+        description: 'Custom version tag (e.g., 0.22.3, v1.0.0). If empty, uses auto-generated tag'
+        required: false
+      version_tag:
+        description: 'Also tag with version from VERSION file'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  build-and-push-quay:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: 'arm64,amd64'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_PASSWORD }}
+
+      - name: Set image metadata
+        id: meta
+        run: |
+          VERSION=$(cat VERSION 2>/dev/null || echo "")
+          SHA_SHORT=$(git rev-parse --short=8 HEAD)
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+          BRANCH_NAME=${BRANCH_NAME//\//-}
+          
+          # Determine primary tag based on event or input
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            PRIMARY_TAG="${{ github.event.inputs.tag }}"
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/* ]]; then
+            PRIMARY_TAG="${{ github.ref_name }}"
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/master" ]]; then
+            PRIMARY_TAG="master-${SHA_SHORT}"
+          else
+            PRIMARY_TAG="${BRANCH_NAME}-${SHA_SHORT}"
+          fi
+          
+          QUAY_REPO="${{ secrets.QUAY_REPOSITORY || 'wire/cassandra-medusa' }}"
+          QUAY_IMAGE="quay.io/${QUAY_REPO}"
+          
+          # Build list of tags (full image paths)
+          TAGS="${QUAY_IMAGE}:${PRIMARY_TAG}"
+          
+          # Add version tag if requested or if VERSION file exists and no custom tag provided
+          if [ "${{ github.event.inputs.version_tag }}" == "true" ] || ([ -n "${VERSION}" ] && [ -z "${{ github.event.inputs.tag }}" ]); then
+            if [ -n "${VERSION}" ]; then
+              TAGS="${TAGS}\n${QUAY_IMAGE}:${VERSION}"
+            fi
+          fi
+          
+          # Always add SHA and latest
+          TAGS="${TAGS}\n${QUAY_IMAGE}:${SHA_SHORT}\n${QUAY_IMAGE}:latest"
+          
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "sha_short=${SHA_SHORT}" >> $GITHUB_OUTPUT
+          echo "primary_tag=${PRIMARY_TAG}" >> $GITHUB_OUTPUT
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          echo -e "${TAGS}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "quay_image=${QUAY_IMAGE}" >> $GITHUB_OUTPUT
+
+      - name: Determine Dockerfile
+        id: dockerfile
+        run: |
+          DOCKERFILE="${{ github.event.inputs.dockerfile || 'k8s/Dockerfile.ubuntu' }}"
+          echo "dockerfile=${DOCKERFILE}" >> $GITHUB_OUTPUT
+          echo "Using Dockerfile: ${DOCKERFILE}"
+
+      - name: Set up Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 2.2.1
+
+      - name: Build Medusa
+        run: |
+          poetry install && poetry build
+
+      - name: Build and push multi-arch image to Quay.io
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ steps.dockerfile.outputs.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Output image information
+        run: |
+          echo "## Docker Images Built and Pushed to Quay.io" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ steps.meta.outputs.version }}" ]; then
+            echo "- **Version**: ${{ steps.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "- **Primary Tag**: ${{ steps.meta.outputs.primary_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **SHA**: ${{ steps.meta.outputs.sha_short }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms**: linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "- **All Tags**: ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Quay.io Image**: ${{ steps.meta.outputs.quay_image }}" >> $GITHUB_STEP_SUMMARY
