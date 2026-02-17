@@ -1,13 +1,6 @@
 name: Build and Push to Quay.io
 
 on:
-  push:
-    branches:
-      - master
-      - 'fix-*'
-    tags:
-      - 'v*'
-  pull_request:
   workflow_dispatch:
     inputs:
       dockerfile:
