@@ -94,7 +94,7 @@ CONFIG_SECTIONS = {
 }
 
 DEFAULT_CONFIGURATION_PATH = pathlib.Path('/etc/medusa/medusa.ini')
-DEFAULT_GRPC_PORT = 50051
+DEFAULT_GRPC_PORT = 50052
 
 
 def _build_default_config():
